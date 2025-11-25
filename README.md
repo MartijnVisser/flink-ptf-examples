@@ -11,9 +11,11 @@ This project demonstrates how to:
 - Run Flink SQL queries using PTFs
 - Deploy everything in a Docker environment
 
-## Example: Hybrid Window PTF
+## Examples
 
-The included `HybridWindowFunction` implements a hybrid tumbling window that:
+### 1. Hybrid Window PTF
+
+The `HybridWindowFunction` implements a hybrid tumbling window that:
 - Creates time-based windows (e.g., 5 second windows) aligned to epoch boundaries
 - Emits window results early if the order count exceeds a threshold
 - Aggregates orders and calculates total price per window
@@ -21,6 +23,42 @@ The included `HybridWindowFunction` implements a hybrid tumbling window that:
 - Uses Flink's time context for accurate window boundaries
 
 **Important Behavior**: When the count threshold triggers an early emission, the state resets and a new aggregation begins. If more events arrive within the same wall-clock tumbling window period, they will be aggregated into a new window with the **same `window_start` and `window_end` timestamps** but different aggregated values. This means multiple rows may share identical window boundaries - this is by design and allows continuous windowing per partition.
+
+### 2. Early Fire Window PTF
+
+The `EarlyFireWindowFunction` implements a tumbling window that emits on every incoming event:
+- Creates time-based windows aligned to epoch boundaries (like standard tumbling windows)
+- Emits the current window aggregation immediately on every event (no waiting for window close)
+- No timers required - window transitions are detected by comparing event timestamps
+- Aggregates orders and calculates total price per window
+- Supports partitioning by key (e.g., customer_id)
+
+**Important: Running Aggregates**
+
+Each emission contains the **cumulative aggregation** of all events within the current window, not just the single triggering event. For example, if 3 events arrive for the same partition in a 5-second window:
+
+| Event # | Event Time | Emitted `num_orders` | Emitted `total_price` |
+|---------|------------|---------------------|----------------------|
+| 1 | 10:00:01 | 1 | 10.0 |
+| 2 | 10:00:02 | 2 | 25.0 *(running total)* |
+| 3 | 10:00:03 | 3 | 40.0 *(running total)* |
+| 4 | 10:00:06 | 1 *(new window, reset)* | 15.0 |
+
+This provides progressive refinement of window results as data arrives.
+
+**Key Differences from Hybrid Window**:
+
+| Aspect | HybridWindowFunction | EarlyFireWindowFunction |
+|--------|---------------------|------------------------|
+| **Emission trigger** | Count threshold OR timer | Every event |
+| **Timer usage** | Yes (window end timer) | No |
+| **State reset** | On emission | On window boundary detection |
+| **Parameters** | `windowSizeMillis`, `countThreshold` | `windowSizeMillis` only |
+
+**Use Cases**:
+- Real-time dashboards requiring immediate updates with running totals
+- Alerting systems that need to react to partial aggregations
+- Progressive result refinement as more data arrives
 
 ## Prerequisites
 
@@ -131,15 +169,19 @@ CREATE TABLE orders (
 );
 ```
 
-#### 2. Register the PTF Function
+#### 2. Register the PTF Functions
 
-Register the ProcessTableFunction by executing the following SQL in the Flink SQL Client:
+Register the ProcessTableFunctions by executing the following SQL in the Flink SQL Client:
 
 ```sql
+-- Hybrid Window PTF (emits on count threshold OR timer)
 CREATE FUNCTION HybridWindow AS 'com.flink.ptf.HybridWindowFunction';
+
+-- Early Fire Window PTF (emits on every event)
+CREATE FUNCTION EarlyFireWindow AS 'com.flink.ptf.EarlyFireWindowFunction';
 ```
 
-#### 3. Use the PTF in a Query
+#### 3. Use the Hybrid Window PTF
 
 Query using the hybrid window. Execute the following SQL in the Flink SQL Client:
 
@@ -159,8 +201,6 @@ FROM HybridWindow(
 );
 ```
 
-**Important Note on `windowSizeMillis` Parameter**: Due to a known Flink issue ([FLINK-37618](https://issues.apache.org/jira/browse/FLINK-37618)), PTFs do not currently support `INTERVAL` arguments. You **must** use `CAST(5000 AS BIGINT)` instead of `INTERVAL '5' SECONDS` for the `windowSizeMillis` parameter. The value should be specified in milliseconds (e.g., `CAST(5000 AS BIGINT)` for 5 seconds).
-
 This query:
 - Partitions orders by `customer_id`
 - Creates 5-second (5000ms) tumbling windows
@@ -168,7 +208,33 @@ This query:
 - Aggregates orders and calculates total price per window
 - Uses `ts` as the event time column
 
-## Understanding the PTF
+#### 4. Use the Early Fire Window PTF
+
+Query using the early fire window. Execute the following SQL in the Flink SQL Client:
+
+```sql
+SELECT 
+    customer_id,
+    window_start,
+    window_end,
+    num_orders,
+    total_price
+FROM EarlyFireWindow(
+    input => TABLE orders PARTITION BY customer_id,
+    windowSizeMillis => CAST(5000 AS BIGINT),
+    on_time => DESCRIPTOR(ts),
+    uid => 'early-fire-win-v1'
+);
+```
+
+This query:
+- Partitions orders by `customer_id`
+- Creates 5-second (5000ms) tumbling windows
+- Emits immediately on every incoming event with current aggregation
+- No count threshold - every event triggers an emission
+- Uses `ts` as the event time column
+
+## Understanding the PTFs
 
 ### HybridWindowFunction
 
@@ -180,16 +246,34 @@ The `HybridWindowFunction` class extends `ProcessTableFunction` and implements:
 4. **Timer-based Expiration**: Uses Flink timers to emit windows at their end time
 5. **Aggregation**: Calculates total price and order count per window
 
-### Parameters
+#### Parameters
 
-- `windowSizeMillis`: The duration of each tumbling window in milliseconds. **Must be specified as `CAST(5000 AS BIGINT)`** (not `INTERVAL '5' SECONDS`) due to [FLINK-37618](https://issues.apache.org/jira/browse/FLINK-37618). Example: `CAST(5000 AS BIGINT)` for 5 seconds.
+- `windowSizeMillis`: The duration of each tumbling window in milliseconds. 
 - `countThreshold`: Maximum number of orders before early emission (e.g., `5000`)
 - `on_time`: Event time descriptor (e.g., `DESCRIPTOR(ts)`)
 - `uid`: Unique identifier for the PTF instance (required for stateful transformations)
 
-### Output Schema
+### EarlyFireWindowFunction
 
-The PTF outputs:
+The `EarlyFireWindowFunction` class extends `ProcessTableFunction` and implements:
+
+1. **Window State Management**: Tracks orders and aggregates data within each window partition
+2. **Time-based Windowing**: Creates windows based on a duration in milliseconds (e.g., 5 seconds)
+3. **Immediate Emission**: Emits window results on every incoming event
+4. **No Timers**: Window transitions detected by comparing event timestamps to current window boundaries
+5. **Aggregation**: Calculates total price and order count per window
+
+#### Parameters
+
+- `windowSizeMillis`: The duration of each tumbling window in milliseconds. 
+- `on_time`: Event time descriptor (e.g., `DESCRIPTOR(ts)`)
+- `uid`: Unique identifier for the PTF instance (required for stateful transformations)
+
+**Important Note on `windowSizeMillis` Parameter**: Due to a known Flink issue ([FLINK-37618](https://issues.apache.org/jira/browse/FLINK-37618)), PTFs do not currently support `INTERVAL` arguments. You **must** use `CAST(5000 AS BIGINT)` instead of `INTERVAL '5' SECONDS` for the `windowSizeMillis` parameter. The value should be specified in milliseconds (e.g., `CAST(5000 AS BIGINT)` for 5 seconds).
+
+### Output Schema (Both PTFs)
+
+Both PTFs output:
 - `window_start`: Start timestamp of the window (TIMESTAMP(3))
 - `window_end`: End timestamp of the window (TIMESTAMP(3))
 - `num_orders`: Number of orders in the window (INT)
@@ -201,22 +285,4 @@ To stop all containers:
 
 ```bash
 docker-compose down
-```
-
-## Project Structure
-
-```
-flink-ptfs/
-├── pom.xml                                    # Maven configuration
-├── Dockerfile                                 # Docker image definition
-├── docker-compose.yml                         # Docker Compose configuration
-├── README.md                                  # This file
-├── src/
-│   └── main/
-│       ├── java/
-│       │   └── com/
-│       │       └── flink/
-│       │           └── ptf/
-│       │               └── HybridWindowFunction.java  # PTF implementation
-└── target/                                    # Build output (generated)
 ```

@@ -9,33 +9,32 @@ import org.apache.flink.types.Row;
 
 /**
  * A hybrid tumbling window ProcessTableFunction that triggers based on whichever comes first:
+ *
  * <ul>
- *   <li><b>Time-based:</b> when the tumbling window ends (timer fires at window boundary)</li>
- *   <li><b>Count-based:</b> when the count threshold is reached</li>
+ *   <li><b>Time-based:</b> when the tumbling window ends (timer fires at window boundary)
+ *   <li><b>Count-based:</b> when the count threshold is reached
  * </ul>
  *
  * <h3>Important Behavior: Multiple Emissions Per Window Period</h3>
- * <p>
- * When the count threshold triggers an early emission, the state resets and a new aggregation
- * begins. If more events arrive within the same wall-clock tumbling window period, they will
- * be aggregated into a new window with the <b>same {@code window_start} and {@code window_end}
+ *
+ * <p>When the count threshold triggers an early emission, the state resets and a new aggregation
+ * begins. If more events arrive within the same wall-clock tumbling window period, they will be
+ * aggregated into a new window with the <b>same {@code window_start} and {@code window_end}
  * timestamps</b> but different aggregated values.
- * </p>
- * <p>
- * This is by design: windows are aligned to epoch-based tumbling boundaries, but each partition
+ *
+ * <p>This is by design: windows are aligned to epoch-based tumbling boundaries, but each partition
  * (e.g., per customer) can emit multiple times within the same time period if the count threshold
- * is exceeded. Downstream consumers should be aware that multiple rows may share identical
- * window boundaries.
- * </p>
+ * is exceeded. Downstream consumers should be aware that multiple rows may share identical window
+ * boundaries.
  *
  * <h3>Usage Note</h3>
- * <p>
- * The {@code windowSizeMillis} parameter must be passed as {@code CAST(5000 AS BIGINT)} rather
- * than {@code INTERVAL '5' SECONDS} due to a known Flink issue with INTERVAL arguments in PTFs.
- * See <a href="https://issues.apache.org/jira/browse/FLINK-37618">FLINK-37618</a> for details.
- * </p>
  *
- * @see <a href="https://issues.apache.org/jira/browse/FLINK-37618">FLINK-37618: Support PTFs INTERVAL argument</a>
+ * <p>The {@code windowSizeMillis} parameter must be passed as {@code CAST(5000 AS BIGINT)} rather
+ * than {@code INTERVAL '5' SECONDS} due to a known Flink issue with INTERVAL arguments in PTFs. See
+ * <a href="https://issues.apache.org/jira/browse/FLINK-37618">FLINK-37618</a> for details.
+ *
+ * @see <a href="https://issues.apache.org/jira/browse/FLINK-37618">FLINK-37618: Support PTFs
+ *     INTERVAL argument</a>
  */
 public class HybridWindowFunction extends ProcessTableFunction<HybridWindowFunction.WindowResult> {
 
