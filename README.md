@@ -656,3 +656,49 @@ FROM DataQualityScorer(
 **Output:** Input columns + `(quality_score, quality_issues, is_valid)`.
 
 **Note:** PASS_COLUMNS_THROUGH only works with single table argument, append-only PTFs, no timers.
+
+### 9. Row Formatter PTF (Polymorphic Table Arguments)
+
+The `RowFormatter` PTF demonstrates polymorphic table arguments by accepting tables with ANY schema:
+
+**Advanced Features:**
+- **Polymorphic Arguments**: Accepts tables with any schema (no `@DataTypeHint` on Row parameter)
+- **Context Schema Inspection**: Uses `Context.tableSemanticsFor()` to discover schema at runtime
+- **MapView State**: Tracks unique row patterns per partition
+- **Dynamic Formatting**: Formats rows based on runtime-discovered partition keys and schema
+
+**How Polymorphic Arguments Work:**
+```java
+// NON-polymorphic: Explicit schema required
+public void eval(@ArgumentHint(SET_SEMANTIC_TABLE) @DataTypeHint("ROW<id INT, name STRING>") Row input) {
+  // Only works with tables matching this exact schema
+}
+
+// POLYMORPHIC: No type hint, accepts ANY schema
+public void eval(Context ctx, @ArgumentHint(SET_SEMANTIC_TABLE) Row input) {
+  var semantics = ctx.tableSemanticsFor("input");
+  DataType actualSchema = semantics.dataType(); // Discover schema at runtime
+  int[] keys = semantics.partitionByColumns();  // Discover partition keys
+}
+```
+
+**State Management:**
+- `seenPatterns`: MapView tracking unique row signatures (24-hour TTL)
+
+**Usage:**
+
+```sql
+-- Works with ANY table!
+CREATE TABLE users (id INT, name STRING, age INT) WITH ('connector' = 'datagen', ...);
+CREATE TABLE orders (order_id STRING, customer_id INT, price DOUBLE) WITH ('connector' = 'datagen', ...);
+
+CREATE FUNCTION RowFormatter AS 'com.flink.ptf.RowFormatter';
+
+-- Same PTF works with different schemas
+SELECT * FROM RowFormatter(input => TABLE users PARTITION BY id, uid => 'rf-users');
+SELECT * FROM RowFormatter(input => TABLE orders PARTITION BY customer_id, uid => 'rf-orders');
+```
+
+**Output:** `(formatted_row, schema_info, distinct_patterns)` - works with any input schema.
+
+**Note:** This is the only example demonstrating polymorphic table arguments and runtime schema inspection via Context APIs.
