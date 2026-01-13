@@ -539,3 +539,64 @@ FROM FirstMatchJoin(
 ```
 
 **Output:** Emits `EnrichedOrder` POJO with order + customer columns and join metadata.
+
+### 7. Changelog Auditor PTF (CDC/Change Data Capture)
+
+The `ChangelogAuditor` PTF demonstrates consuming changelog streams with SUPPORT_UPDATES:
+
+**Advanced Features:**
+- **SUPPORT_UPDATES**: Consumes changelog streams (INSERT, UPDATE, DELETE)
+- **RowKind Handling**: Inspects `input.getKind()` to determine change type
+- **Versioned Views**: Works with views that produce changelog output
+- **Audit Trail**: Converts changelog to append-only audit log
+
+**Changelog Types:**
+- `INSERT (+I)`: New record
+- `UPDATE_AFTER (+U)`: Updated record (new value)
+- `UPDATE_BEFORE (-U)`: Retracted value (old value, optional)
+- `DELETE (-D)`: Deleted record
+
+**State Management:**
+- `RateState`: POJO tracking last known rate per currency (7-day TTL)
+
+**Usage:**
+
+```sql
+-- Create source table
+CREATE TABLE currency_rates (
+    currency_idx INT,
+    currency AS CASE currency_idx
+        WHEN 0 THEN 'EUR' WHEN 1 THEN 'USD' WHEN 2 THEN 'GBP'
+        WHEN 3 THEN 'JPY' WHEN 4 THEN 'CHF' ELSE 'UNK'
+    END,
+    rate DECIMAL(10, 4),
+    update_time TIMESTAMP(3),
+    WATERMARK FOR update_time AS update_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '2',
+    'fields.currency_idx.min' = '0',
+    'fields.currency_idx.max' = '4',
+    'fields.rate.min' = '0.5',
+    'fields.rate.max' = '2.0'
+);
+
+-- Create versioned view (generates changelog)
+CREATE VIEW versioned_rates AS
+SELECT currency, rate, update_time
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY currency ORDER BY update_time DESC) AS rownum
+    FROM currency_rates
+)
+WHERE rownum = 1;
+
+CREATE FUNCTION ChangelogAuditor AS 'com.flink.ptf.ChangelogAuditor';
+
+SELECT change_type, currency, old_rate, new_rate, change_time
+FROM ChangelogAuditor(
+    input => TABLE versioned_rates PARTITION BY currency,
+    uid => 'changelog-auditor-v1'
+);
+```
+
+**Output:** Emits Row with `(change_type, currency, old_rate, new_rate, change_time)`.
