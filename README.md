@@ -600,3 +600,59 @@ FROM ChangelogAuditor(
 ```
 
 **Output:** Emits Row with `(change_type, currency, old_rate, new_rate, change_time)`.
+
+### 8. Data Quality Scorer PTF (PASS_COLUMNS_THROUGH)
+
+The `DataQualityScorer` PTF demonstrates automatic column forwarding with PASS_COLUMNS_THROUGH:
+
+**Advanced Features:**
+- **PASS_COLUMNS_THROUGH**: Preserves all input columns in output automatically
+- **ROW_SEMANTIC_TABLE**: Stateless row-by-row processing
+- **No State**: Purely computational (no POJO state, no TTL)
+- **Validation**: Checks data quality and emits scores
+
+**How PASS_COLUMNS_THROUGH Works:**
+1. PTF defines ONLY new output columns (quality_score, quality_issues, is_valid)
+2. All input columns are automatically forwarded
+3. No manual column handling needed
+
+**Validation Rules:**
+- Amount range check (> 0 and < 1,000,000)
+- Country validation (ISO codes)
+- UserId format check
+
+**Usage:**
+
+```sql
+CREATE TABLE transactions (
+    transactionId STRING,
+    userId STRING,
+    amount DOUBLE,
+    country STRING,
+    ts BIGINT
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '10',
+    'fields.transactionId.length' = '10',
+    'fields.userId.length' = '5',
+    'fields.amount.min' = '-100',
+    'fields.amount.max' = '10000',
+    'fields.country.length' = '2',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '10000000'
+);
+
+CREATE FUNCTION DataQualityScorer AS 'com.flink.ptf.DataQualityScorer';
+
+-- Output includes ALL input columns PLUS quality_score, quality_issues, is_valid
+SELECT *
+FROM DataQualityScorer(
+    input => TABLE transactions,
+    uid => 'data-quality-v1'
+);
+```
+
+**Output:** Input columns + `(quality_score, quality_issues, is_valid)`.
+
+**Note:** PASS_COLUMNS_THROUGH only works with single table argument, append-only PTFs, no timers.
