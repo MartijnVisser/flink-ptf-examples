@@ -1,0 +1,2 @@
+{"status":"BEGIN","id":"12345:98765432","ts_ms":1718294400123,"event_count":null,"data_collections":null}
+{"status":"END","id":"12345:98765432","ts_ms":1718294400230,"event_count":4,"data_collections":[{"data_collection":"public.orders","event_count":2},{"data_collection":"public.order_items","event_count":2}]}
