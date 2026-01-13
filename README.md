@@ -409,3 +409,57 @@ FROM DynamicPricingEngine(
 ```
 
 **Output:** Emits `PriceUpdate` POJO with `(sku, newPrice, oldPrice, reason, timestamp)` when price changes exceed threshold.
+
+### 5. Session Tracker PTF (Enhanced)
+
+The `SessionTracker` PTF demonstrates timers and ListView for session management:
+
+**Advanced Features:**
+- **ListView State**: Stores all events within a session
+- **Timers**: Uses `registerOnTime()` to detect session timeout
+- **TimeContext**: Accesses event time for session expiration
+- **Scalar Arguments**: Accepts `sessionTimeoutMillis` parameter
+
+**Session Logic:**
+1. Each event extends the session timeout
+2. On timeout (via timer), emits session summary with all events
+3. ListView stores event history for aggregation
+
+**State Management:**
+- `SessionState`: POJO tracking session start, event count, total value (2-hour TTL)
+- `events`: ListView of session events
+
+**Usage:**
+
+```sql
+CREATE TABLE user_events (
+    userId STRING,
+    eventType STRING,
+    eventValue DOUBLE,
+    ts BIGINT,
+    event_time AS TO_TIMESTAMP_LTZ(ts, 3),
+    WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '5',
+    'fields.userId.length' = '3',
+    'fields.eventType.length' = '5',
+    'fields.eventValue.min' = '1',
+    'fields.eventValue.max' = '100',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '10000000'
+);
+
+CREATE FUNCTION SessionTracker AS 'com.flink.ptf.SessionTracker';
+
+SELECT userId, sessionStart, sessionEnd, eventCount, totalValue, eventTypes
+FROM SessionTracker(
+    input => TABLE user_events PARTITION BY userId,
+    sessionTimeoutMillis => CAST(30000 AS BIGINT),
+    on_time => DESCRIPTOR(event_time),
+    uid => 'session-tracker-v1'
+);
+```
+
+**Output:** Emits `SessionSummary` POJO with `(userId, sessionStart, sessionEnd, eventCount, totalValue, eventTypes)`.
