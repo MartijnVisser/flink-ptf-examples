@@ -1,64 +1,37 @@
 # Apache Flink ProcessTableFunction Examples
 
-This repository contains example implementations of Apache Flink ProcessTableFunctions (PTFs) that connect to Confluent Cloud Kafka clusters using Avro Confluent format.
+This repository contains example implementations of Apache Flink ProcessTableFunctions (PTFs) demonstrating various stateful stream processing patterns.
 
 ## Overview
 
 This project demonstrates how to:
 - Create custom ProcessTableFunctions in Apache Flink 2.2
-- Connect to Confluent Cloud Kafka using the Kafka connector 4.0.1-2.0
-- Use Avro Confluent format for deserialization
+- Use various PTF features: state management, timers, multiple inputs, changelog handling
 - Run Flink SQL queries using PTFs
 - Deploy everything in a Docker environment
 
-## Examples
+**Most examples work standalone** with Flink's built-in Datagen connector - no external dependencies required. Two examples optionally demonstrate Confluent Cloud Kafka integration.
 
-### 1. Hybrid Window PTF
+## Table of Contents
 
-The `HybridWindowFunction` implements a hybrid tumbling window that:
-- Creates time-based windows (e.g., 5 second windows) aligned to epoch boundaries
-- Emits window results early if the order count exceeds a threshold
-- Aggregates orders and calculates total price per window
-- Supports partitioning by key (e.g., customer_id)
-- Uses Flink's time context for accurate window boundaries
-
-**Important Behavior**: When the count threshold triggers an early emission, the state resets and a new aggregation begins. If more events arrive within the same wall-clock tumbling window period, they will be aggregated into a new window with the **same `window_start` and `window_end` timestamps** but different aggregated values. This means multiple rows may share identical window boundaries - this is by design and allows continuous windowing per partition.
-
-### 2. Early Fire Window PTF
-
-The `EarlyFireWindowFunction` implements a tumbling window that emits on every incoming event:
-- Creates time-based windows aligned to epoch boundaries (like standard tumbling windows)
-- Emits the current window aggregation immediately on every event (no waiting for window close)
-- No timers required - window transitions are detected by comparing event timestamps
-- Aggregates orders and calculates total price per window
-- Supports partitioning by key (e.g., customer_id)
-
-**Important: Running Aggregates**
-
-Each emission contains the **cumulative aggregation** of all events within the current window, not just the single triggering event. For example, if 3 events arrive for the same partition in a 5-second window:
-
-| Event # | Event Time | Emitted `num_orders` | Emitted `total_price` |
-|---------|------------|---------------------|----------------------|
-| 1 | 10:00:01 | 1 | 10.0 |
-| 2 | 10:00:02 | 2 | 25.0 *(running total)* |
-| 3 | 10:00:03 | 3 | 40.0 *(running total)* |
-| 4 | 10:00:06 | 1 *(new window, reset)* | 15.0 |
-
-This provides progressive refinement of window results as data arrives.
-
-**Key Differences from Hybrid Window**:
-
-| Aspect | HybridWindowFunction | EarlyFireWindowFunction |
-|--------|---------------------|------------------------|
-| **Emission trigger** | Count threshold OR timer | Every event |
-| **Timer usage** | Yes (window end timer) | No |
-| **State reset** | On emission | On window boundary detection |
-| **Parameters** | `windowSizeMillis`, `countThreshold` | `windowSizeMillis` only |
-
-**Use Cases**:
-- Real-time dashboards requiring immediate updates with running totals
-- Alerting systems that need to react to partial aggregations
-- Progressive result refinement as more data arrives
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running the Examples](#running-the-examples)
+- [Standalone Examples](#standalone-examples) (no external dependencies)
+  - [1. Anomaly Detector PTF](#1-anomaly-detector-ptf) - MapView + ListView state for fraud detection
+  - [2. Dynamic Pricing Engine PTF](#2-dynamic-pricing-engine-ptf) - Multiple input streams
+  - [3. Session Tracker PTF](#3-session-tracker-ptf) - ListView + timers for session management
+  - [4. First Match Join PTF](#4-first-match-join-ptf) - Multiple inputs for join patterns
+  - [5. Changelog Auditor PTF](#5-changelog-auditor-ptf) - CDC handling with SUPPORT_UPDATES
+  - [6. Data Quality Scorer PTF](#6-data-quality-scorer-ptf) - PASS_COLUMNS_THROUGH
+  - [7. Row Formatter PTF](#7-row-formatter-ptf) - Polymorphic table arguments
+  - [8. Debezium Transaction Denormalizer PTF](#8-debezium-transaction-denormalizer-ptf) - Transaction aggregation
+  - [9. DynamoDB Changelog Emitter PTF](#9-dynamodb-changelog-emitter-ptf) - Changelog output with ChangelogFunction
+- [Confluent Cloud Examples](#confluent-cloud-examples) (requires Kafka)
+  - [10. Hybrid Window PTF](#10-hybrid-window-ptf) - Time + count based tumbling windows
+  - [11. Early Fire Window PTF](#11-early-fire-window-ptf) - Immediate emission tumbling windows
+- [Understanding the PTFs](#understanding-the-ptfs)
+- [Stopping Docker Containers](#stopping-docker-containers)
 
 ## Prerequisites
 
@@ -66,13 +39,8 @@ This provides progressive refinement of window results as data arrives.
 - Maven 3.6+ (for building the project)
 - Java 11+
 
-**For Kafka examples (HybridWindow, EarlyFireWindow) only:**
-- Confluent Cloud account with:
-  - Kafka cluster
-  - Schema Registry
-  - API keys and secrets
-
-**Note:** Datagen examples (3-10) work standalone without any external dependencies.
+**For Confluent Cloud examples (10-11) only:**
+- Confluent Cloud account with Kafka cluster, Schema Registry, and API keys
 
 ## Setup
 
@@ -133,173 +101,17 @@ You can monitor jobs, check task manager status, and view job execution details.
 docker compose run --rm sql-client
 ```
 
-### Execute Example SQL Queries
+---
 
-#### Prerequisite: Orders Data in Confluent Cloud
+## Standalone Examples
 
-This example assumes you have an `orders` topic with data in Confluent Cloud. If you don't have one, you can easily create it using [Confluent Cloud for Apache Flink](https://confluent.cloud) by running the following SQL in the Confluent Cloud for Apache Flink workspace:
+The following examples use Flink's built-in Datagen connector or filesystem connector to generate/read sample data, making them easy to run without external dependencies.
 
-```sql
-CREATE TABLE orders AS SELECT * FROM examples.marketplace.orders;
-```
-
-This creates an `orders` table populated with sample marketplace data from Confluent's built-in examples.
-
-#### 1. Create Kafka Table
-
-Create the Kafka table in your local Flink cluster to connect to your Confluent Cloud topic. Execute the following SQL in the Flink SQL Client:
-
-```sql
-CREATE TABLE orders (
-    order_id VARCHAR(2147483647) NOT NULL,
-    customer_id INT NOT NULL,
-    product_id VARCHAR(2147483647) NOT NULL,
-    price DOUBLE NOT NULL,
-    ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp' VIRTUAL,
-    WATERMARK FOR ts AS ts - INTERVAL '0.001' SECOND
-) WITH (
-    'connector' = 'kafka',
-    'topic' = 'orders',
-    'properties.bootstrap.servers' = 'YOUR_BOOTSTRAP_SERVERS',
-    'properties.security.protocol' = 'SASL_SSL',
-    'properties.sasl.mechanism' = 'PLAIN',
-    'properties.sasl.jaas.config' = 'org.apache.flink.kafka.shaded.org.apache.kafka.common.security.plain.PlainLoginModule required username="YOUR_KAFKA_API_KEY" password="YOUR_KAFKA_API_SECRET";',
-    'properties.group.id' = 'flink-ptf-consumer',
-    'scan.startup.mode' = 'earliest-offset',
-    'format' = 'avro-confluent',
-    'avro-confluent.url' = 'YOUR_SCHEMA_REGISTRY_URL',
-    'avro-confluent.basic-auth.credentials-source' = 'USER_INFO',
-    'avro-confluent.basic-auth.user-info' = 'YOUR_SCHEMA_REGISTRY_API_KEY:YOUR_SCHEMA_REGISTRY_API_SECRET'
-);
-```
-
-#### 2. Register the PTF Functions
-
-Register the ProcessTableFunctions by executing the following SQL in the Flink SQL Client:
-
-```sql
--- Hybrid Window PTF (emits on count threshold OR timer)
-CREATE FUNCTION HybridWindow AS 'com.flink.ptf.HybridWindowFunction';
-
--- Early Fire Window PTF (emits on every event)
-CREATE FUNCTION EarlyFireWindow AS 'com.flink.ptf.EarlyFireWindowFunction';
-```
-
-#### 3. Use the Hybrid Window PTF
-
-Query using the hybrid window. Execute the following SQL in the Flink SQL Client:
-
-```sql
-SELECT 
-    customer_id,
-    window_start,
-    window_end,
-    num_orders,
-    total_price
-FROM HybridWindow(
-    input => TABLE orders PARTITION BY customer_id,
-    windowSizeMillis => CAST(5000 AS BIGINT),
-    countThreshold => 5000,
-    on_time => DESCRIPTOR(ts),
-    uid => 'hybrid-win-v3'
-);
-```
-
-This query:
-- Partitions orders by `customer_id`
-- Creates 5-second (5000ms) tumbling windows
-- Emits early if more than 5000 orders are received in a window
-- Aggregates orders and calculates total price per window
-- Uses `ts` as the event time column
-
-#### 4. Use the Early Fire Window PTF
-
-Query using the early fire window. Execute the following SQL in the Flink SQL Client:
-
-```sql
-SELECT 
-    customer_id,
-    window_start,
-    window_end,
-    num_orders,
-    total_price
-FROM EarlyFireWindow(
-    input => TABLE orders PARTITION BY customer_id,
-    windowSizeMillis => CAST(5000 AS BIGINT),
-    on_time => DESCRIPTOR(ts),
-    uid => 'early-fire-win-v1'
-);
-```
-
-This query:
-- Partitions orders by `customer_id`
-- Creates 5-second (5000ms) tumbling windows
-- Emits immediately on every incoming event with current aggregation
-- No count threshold - every event triggers an emission
-- Uses `ts` as the event time column
-
-## Understanding the PTFs
-
-### HybridWindowFunction
-
-The `HybridWindowFunction` class extends `ProcessTableFunction` and implements:
-
-1. **Window State Management**: Tracks orders and aggregates data within each window partition
-2. **Time-based Windowing**: Creates windows based on a duration in milliseconds (e.g., 5 seconds)
-3. **Early Emission**: Emits window results when order count exceeds threshold
-4. **Timer-based Expiration**: Uses Flink timers to emit windows at their end time
-5. **Aggregation**: Calculates total price and order count per window
-
-#### Parameters
-
-- `windowSizeMillis`: The duration of each tumbling window in milliseconds. 
-- `countThreshold`: Maximum number of orders before early emission (e.g., `5000`)
-- `on_time`: Event time descriptor (e.g., `DESCRIPTOR(ts)`)
-- `uid`: Unique identifier for the PTF instance (required for stateful transformations)
-
-### EarlyFireWindowFunction
-
-The `EarlyFireWindowFunction` class extends `ProcessTableFunction` and implements:
-
-1. **Window State Management**: Tracks orders and aggregates data within each window partition
-2. **Time-based Windowing**: Creates windows based on a duration in milliseconds (e.g., 5 seconds)
-3. **Immediate Emission**: Emits window results on every incoming event
-4. **No Timers**: Window transitions detected by comparing event timestamps to current window boundaries
-5. **Aggregation**: Calculates total price and order count per window
-
-#### Parameters
-
-- `windowSizeMillis`: The duration of each tumbling window in milliseconds. 
-- `on_time`: Event time descriptor (e.g., `DESCRIPTOR(ts)`)
-- `uid`: Unique identifier for the PTF instance (required for stateful transformations)
-
-**Important Note on `windowSizeMillis` Parameter**: Due to a known Flink issue ([FLINK-37618](https://issues.apache.org/jira/browse/FLINK-37618)), PTFs do not currently support `INTERVAL` arguments. You **must** use `CAST(5000 AS BIGINT)` instead of `INTERVAL '5' SECONDS` for the `windowSizeMillis` parameter. The value should be specified in milliseconds (e.g., `CAST(5000 AS BIGINT)` for 5 seconds).
-
-### Output Schema (Both PTFs)
-
-Both PTFs output:
-- `window_start`: Start timestamp of the window (TIMESTAMP(3))
-- `window_end`: End timestamp of the window (TIMESTAMP(3))
-- `num_orders`: Number of orders in the window (INT)
-- `total_price`: Total price of all orders in the window (DOUBLE)
-
-## Stopping Docker Containers
-
-To stop all containers:
-
-```bash
-docker-compose down
-```
-
-## Datagen Examples
-
-The following examples use Flink's built-in Datagen connector to generate sample data, making them easy to run without external dependencies.
-
-### 3. Anomaly Detector PTF (Enhanced)
+### 1. Anomaly Detector PTF
 
 The `AnomalyDetector` PTF demonstrates advanced state management with multiple state types for fraud detection:
 
-**Advanced Features:**
+**Features:**
 - **MapView State**: Tracks merchant transaction counts (24-hour TTL)
 - **ListView State**: Maintains transaction history for pattern analysis (7-day TTL)
 - **Value State (POJO)**: Stores user profile with spending patterns (30-day TTL)
@@ -344,11 +156,11 @@ FROM AnomalyDetector(
 
 **Output:** Emits `AnomalyResult` POJO with `(userId, isAnomaly, anomalyScore, reason, transactionAmount, timestamp)`.
 
-### 4. Dynamic Pricing Engine PTF (Enhanced)
+### 2. Dynamic Pricing Engine PTF
 
 The `DynamicPricingEngine` PTF demonstrates multiple input streams and optional inputs for real-time pricing:
 
-**Advanced Features:**
+**Features:**
 - **Multiple Input Streams**: Processes inventory updates AND competitor prices (2 tables)
 - **Optional Inputs**: Competitor prices are optional (null checks in eval)
 - **POJO Output**: Strongly-typed `PriceUpdate` output
@@ -414,11 +226,11 @@ FROM DynamicPricingEngine(
 
 **Output:** Emits `PriceUpdate` POJO with `(sku, newPrice, oldPrice, reason, timestamp)` when price changes exceed threshold.
 
-### 5. Session Tracker PTF (Enhanced)
+### 3. Session Tracker PTF
 
 The `SessionTracker` PTF demonstrates timers and ListView for session management:
 
-**Advanced Features:**
+**Features:**
 - **ListView State**: Stores all events within a session
 - **Timers**: Uses `registerOnTime()` to detect session timeout
 - **TimeContext**: Accesses event time for session expiration
@@ -468,11 +280,11 @@ FROM SessionTracker(
 
 **Output:** Emits `SessionSummary` POJO with `(userId, sessionStart, sessionEnd, eventCount, totalValue, eventTypes)`.
 
-### 6. First Match Join PTF (Enhanced)
+### 4. First Match Join PTF
 
 The `FirstMatchJoin` PTF demonstrates a specialized join pattern with multiple inputs:
 
-**Advanced Features:**
+**Features:**
 - **Multiple Input Streams**: Processes orders AND customers (2 tables)
 - **First-Match Semantics**: Emits only once when both sides arrive (no updates)
 - **POJO Output**: Strongly-typed `EnrichedOrder` output
@@ -544,11 +356,11 @@ FROM FirstMatchJoin(
 
 **Output:** Emits `EnrichedOrder` POJO with order + customer columns and join metadata.
 
-### 7. Changelog Auditor PTF (CDC/Change Data Capture)
+### 5. Changelog Auditor PTF
 
 The `ChangelogAuditor` PTF demonstrates consuming changelog streams with SUPPORT_UPDATES:
 
-**Advanced Features:**
+**Features:**
 - **SUPPORT_UPDATES**: Consumes changelog streams (INSERT, UPDATE, DELETE)
 - **RowKind Handling**: Inspects `input.getKind()` to determine change type
 - **Audit Trail**: Converts changelog to append-only audit log
@@ -604,11 +416,11 @@ FROM ChangelogAuditor(
 
 **Output:** Emits Row with `(change_type, currency, old_rate, new_rate, change_time)`.
 
-### 8. Data Quality Scorer PTF (PASS_COLUMNS_THROUGH)
+### 6. Data Quality Scorer PTF
 
 The `DataQualityScorer` PTF demonstrates automatic column forwarding with PASS_COLUMNS_THROUGH:
 
-**Advanced Features:**
+**Features:**
 - **PASS_COLUMNS_THROUGH**: Preserves all input columns in output automatically
 - **ROW_SEMANTIC_TABLE**: Stateless row-by-row processing
 - **No State**: Purely computational (no POJO state, no TTL)
@@ -660,11 +472,11 @@ FROM DataQualityScorer(
 
 **Note:** PASS_COLUMNS_THROUGH only works with single table argument, append-only PTFs, no timers.
 
-### 9. Row Formatter PTF (Polymorphic Table Arguments)
+### 7. Row Formatter PTF
 
 The `RowFormatter` PTF demonstrates polymorphic table arguments by accepting tables with ANY schema:
 
-**Advanced Features:**
+**Features:**
 - **Polymorphic Arguments**: Accepts tables with any schema (no `@DataTypeHint` on Row parameter)
 - **Context Schema Inspection**: Uses `Context.tableSemanticsFor()` to discover schema at runtime
 - **MapView State**: Tracks unique row patterns per partition
@@ -708,11 +520,11 @@ SELECT * FROM RowFormatter(input => TABLE orders PARTITION BY customer_id, uid =
 
 **Note:** This is the only example demonstrating polymorphic table arguments and runtime schema inspection via Context APIs.
 
-### 10. Debezium Transaction Denormalizer PTF (Transaction Aggregation)
+### 8. Debezium Transaction Denormalizer PTF
 
 The `DebeziumTransactionDenormalizer` PTF aggregates multiple CDC events from different tables that belong to the same database transaction into a single denormalized event:
 
-**Advanced Features:**
+**Features:**
 - **Multiple Input Streams**: Processes orders CDC + order_items CDC + transaction boundary events
 - **Transaction Boundary Detection**: Uses Debezium's transaction metadata (BEGIN/END events)
 - **Completion Detection**: Waits for all events before emitting
@@ -801,7 +613,7 @@ FROM DebeziumTransactionDenormalizer(
 
 **Note:** The `line_items` field contains a `LineItem[]` array with product details. The SQL Client cannot display nested arrays in table view, but the data is correctly populated. Use `CARDINALITY(line_items)` to verify or sink to Kafka/filesystem for full output.
 
-### 11. DynamoDB Changelog Emitter PTF (Changelog Output)
+### 9. DynamoDB Changelog Emitter PTF
 
 The `DynamoDBChangelogEmitter` PTF demonstrates emitting changelog output from append-only input - the inverse of ChangelogAuditor:
 
@@ -810,7 +622,7 @@ The `DynamoDBChangelogEmitter` PTF demonstrates emitting changelog output from a
 | ChangelogAuditor | Changelog (updating) | Append-only |
 | DynamoDBChangelogEmitter | Append-only (CDC JSON) | Changelog (updating) |
 
-**Advanced Features:**
+**Features:**
 - **ChangelogFunction Interface**: Declares retract output mode `{+I, -U, +U, -D}`
 - **Row.ofKind()**: Emits rows with explicit RowKind (INSERT, UPDATE_BEFORE, UPDATE_AFTER, DELETE)
 - **DynamoDB Type Parsing**: Extracts values from `{"S": "...", "N": "..."}` wrappers
@@ -871,3 +683,202 @@ FROM DynamoDBChangelogEmitter(
 - Row 3: `+U` for user#1 MODIFY (new: age 31)
 - Row 4: `+I` for user#2 INSERT (Bob, age 25)
 - Row 5: `-D` for user#1 REMOVE
+
+---
+
+## Confluent Cloud Examples
+
+The following examples demonstrate integration with Confluent Cloud Kafka. They require a Confluent Cloud account with Kafka cluster, Schema Registry, and API credentials.
+
+### Prerequisite: Orders Data in Confluent Cloud
+
+These examples assume you have an `orders` topic with data in Confluent Cloud. If you don't have one, you can easily create it using [Confluent Cloud for Apache Flink](https://confluent.cloud) by running the following SQL in the Confluent Cloud for Apache Flink workspace:
+
+```sql
+CREATE TABLE orders AS SELECT * FROM examples.marketplace.orders;
+```
+
+This creates an `orders` table populated with sample marketplace data from Confluent's built-in examples.
+
+### Create Kafka Table
+
+Create the Kafka table in your local Flink cluster to connect to your Confluent Cloud topic. Execute the following SQL in the Flink SQL Client:
+
+```sql
+CREATE TABLE orders (
+    order_id VARCHAR(2147483647) NOT NULL,
+    customer_id INT NOT NULL,
+    product_id VARCHAR(2147483647) NOT NULL,
+    price DOUBLE NOT NULL,
+    ts TIMESTAMP_LTZ(3) METADATA FROM 'timestamp' VIRTUAL,
+    WATERMARK FOR ts AS ts - INTERVAL '0.001' SECOND
+) WITH (
+    'connector' = 'kafka',
+    'topic' = 'orders',
+    'properties.bootstrap.servers' = 'YOUR_BOOTSTRAP_SERVERS',
+    'properties.security.protocol' = 'SASL_SSL',
+    'properties.sasl.mechanism' = 'PLAIN',
+    'properties.sasl.jaas.config' = 'org.apache.flink.kafka.shaded.org.apache.kafka.common.security.plain.PlainLoginModule required username="YOUR_KAFKA_API_KEY" password="YOUR_KAFKA_API_SECRET";',
+    'properties.group.id' = 'flink-ptf-consumer',
+    'scan.startup.mode' = 'earliest-offset',
+    'format' = 'avro-confluent',
+    'avro-confluent.url' = 'YOUR_SCHEMA_REGISTRY_URL',
+    'avro-confluent.basic-auth.credentials-source' = 'USER_INFO',
+    'avro-confluent.basic-auth.user-info' = 'YOUR_SCHEMA_REGISTRY_API_KEY:YOUR_SCHEMA_REGISTRY_API_SECRET'
+);
+```
+
+### 10. Hybrid Window PTF
+
+The `HybridWindowFunction` implements a hybrid tumbling window that:
+- Creates time-based windows (e.g., 5 second windows) aligned to epoch boundaries
+- Emits window results early if the order count exceeds a threshold
+- Aggregates orders and calculates total price per window
+- Supports partitioning by key (e.g., customer_id)
+- Uses Flink's time context for accurate window boundaries
+
+**Important Behavior**: When the count threshold triggers an early emission, the state resets and a new aggregation begins. If more events arrive within the same wall-clock tumbling window period, they will be aggregated into a new window with the **same `window_start` and `window_end` timestamps** but different aggregated values. This means multiple rows may share identical window boundaries - this is by design and allows continuous windowing per partition.
+
+**Usage:**
+
+```sql
+CREATE FUNCTION HybridWindow AS 'com.flink.ptf.HybridWindowFunction';
+
+SELECT
+    customer_id,
+    window_start,
+    window_end,
+    num_orders,
+    total_price
+FROM HybridWindow(
+    input => TABLE orders PARTITION BY customer_id,
+    windowSizeMillis => CAST(5000 AS BIGINT),
+    countThreshold => 5000,
+    on_time => DESCRIPTOR(ts),
+    uid => 'hybrid-win-v3'
+);
+```
+
+This query:
+- Partitions orders by `customer_id`
+- Creates 5-second (5000ms) tumbling windows
+- Emits early if more than 5000 orders are received in a window
+- Aggregates orders and calculates total price per window
+- Uses `ts` as the event time column
+
+### 11. Early Fire Window PTF
+
+The `EarlyFireWindowFunction` implements a tumbling window that emits on every incoming event:
+- Creates time-based windows aligned to epoch boundaries (like standard tumbling windows)
+- Emits the current window aggregation immediately on every event (no waiting for window close)
+- No timers required - window transitions are detected by comparing event timestamps
+- Aggregates orders and calculates total price per window
+- Supports partitioning by key (e.g., customer_id)
+
+**Important: Running Aggregates**
+
+Each emission contains the **cumulative aggregation** of all events within the current window, not just the single triggering event. For example, if 3 events arrive for the same partition in a 5-second window:
+
+| Event # | Event Time | Emitted `num_orders` | Emitted `total_price` |
+|---------|------------|---------------------|----------------------|
+| 1 | 10:00:01 | 1 | 10.0 |
+| 2 | 10:00:02 | 2 | 25.0 *(running total)* |
+| 3 | 10:00:03 | 3 | 40.0 *(running total)* |
+| 4 | 10:00:06 | 1 *(new window, reset)* | 15.0 |
+
+This provides progressive refinement of window results as data arrives.
+
+**Key Differences from Hybrid Window**:
+
+| Aspect | HybridWindowFunction | EarlyFireWindowFunction |
+|--------|---------------------|------------------------|
+| **Emission trigger** | Count threshold OR timer | Every event |
+| **Timer usage** | Yes (window end timer) | No |
+| **State reset** | On emission | On window boundary detection |
+| **Parameters** | `windowSizeMillis`, `countThreshold` | `windowSizeMillis` only |
+
+**Use Cases**:
+- Real-time dashboards requiring immediate updates with running totals
+- Alerting systems that need to react to partial aggregations
+- Progressive result refinement as more data arrives
+
+**Usage:**
+
+```sql
+CREATE FUNCTION EarlyFireWindow AS 'com.flink.ptf.EarlyFireWindowFunction';
+
+SELECT
+    customer_id,
+    window_start,
+    window_end,
+    num_orders,
+    total_price
+FROM EarlyFireWindow(
+    input => TABLE orders PARTITION BY customer_id,
+    windowSizeMillis => CAST(5000 AS BIGINT),
+    on_time => DESCRIPTOR(ts),
+    uid => 'early-fire-win-v1'
+);
+```
+
+This query:
+- Partitions orders by `customer_id`
+- Creates 5-second (5000ms) tumbling windows
+- Emits immediately on every incoming event with current aggregation
+- No count threshold - every event triggers an emission
+- Uses `ts` as the event time column
+
+---
+
+## Understanding the PTFs
+
+### HybridWindowFunction
+
+The `HybridWindowFunction` class extends `ProcessTableFunction` and implements:
+
+1. **Window State Management**: Tracks orders and aggregates data within each window partition
+2. **Time-based Windowing**: Creates windows based on a duration in milliseconds (e.g., 5 seconds)
+3. **Early Emission**: Emits window results when order count exceeds threshold
+4. **Timer-based Expiration**: Uses Flink timers to emit windows at their end time
+5. **Aggregation**: Calculates total price and order count per window
+
+#### Parameters
+
+- `windowSizeMillis`: The duration of each tumbling window in milliseconds.
+- `countThreshold`: Maximum number of orders before early emission (e.g., `5000`)
+- `on_time`: Event time descriptor (e.g., `DESCRIPTOR(ts)`)
+- `uid`: Unique identifier for the PTF instance (required for stateful transformations)
+
+### EarlyFireWindowFunction
+
+The `EarlyFireWindowFunction` class extends `ProcessTableFunction` and implements:
+
+1. **Window State Management**: Tracks orders and aggregates data within each window partition
+2. **Time-based Windowing**: Creates windows based on a duration in milliseconds (e.g., 5 seconds)
+3. **Immediate Emission**: Emits window results on every incoming event
+4. **No Timers**: Window transitions detected by comparing event timestamps to current window boundaries
+5. **Aggregation**: Calculates total price and order count per window
+
+#### Parameters
+
+- `windowSizeMillis`: The duration of each tumbling window in milliseconds.
+- `on_time`: Event time descriptor (e.g., `DESCRIPTOR(ts)`)
+- `uid`: Unique identifier for the PTF instance (required for stateful transformations)
+
+**Important Note on `windowSizeMillis` Parameter**: Due to a known Flink issue ([FLINK-37618](https://issues.apache.org/jira/browse/FLINK-37618)), PTFs do not currently support `INTERVAL` arguments. You **must** use `CAST(5000 AS BIGINT)` instead of `INTERVAL '5' SECONDS` for the `windowSizeMillis` parameter. The value should be specified in milliseconds (e.g., `CAST(5000 AS BIGINT)` for 5 seconds).
+
+### Output Schema (Both PTFs)
+
+Both PTFs output:
+- `window_start`: Start timestamp of the window (TIMESTAMP(3))
+- `window_end`: End timestamp of the window (TIMESTAMP(3))
+- `num_orders`: Number of orders in the window (INT)
+- `total_price`: Total price of all orders in the window (DOUBLE)
+
+## Stopping Docker Containers
+
+To stop all containers:
+
+```bash
+docker-compose down
+```
