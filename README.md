@@ -339,3 +339,73 @@ FROM AnomalyDetector(
 ```
 
 **Output:** Emits `AnomalyResult` POJO with `(userId, isAnomaly, anomalyScore, reason, transactionAmount, timestamp)`.
+
+### 4. Dynamic Pricing Engine PTF (Enhanced)
+
+The `DynamicPricingEngine` PTF demonstrates multiple input streams and optional inputs for real-time pricing:
+
+**Advanced Features:**
+- **Multiple Input Streams**: Processes inventory updates AND competitor prices (2 tables)
+- **Optional Inputs**: Competitor prices are optional (null checks in eval)
+- **POJO Output**: Strongly-typed `PriceUpdate` output
+- **Hardcoded Configuration**: Uses constants instead of scalar arguments (Flink limitation with multiple tables)
+
+**Pricing Rules (Priority Order):**
+1. Low Inventory (< 10 units) → 15% price increase
+2. High Demand (> 100 signals) → 8% price increase
+3. Competitor Matching → Undercut by 2%
+
+**State Management:**
+- `PricingState`: POJO tracking current price, inventory, competitor price, demand signals (7-day TTL)
+
+**Usage:**
+
+```sql
+CREATE TABLE inventory (
+    sku STRING,
+    quantity INT,
+    basePrice DOUBLE,
+    ts BIGINT,
+    event_time AS TO_TIMESTAMP_LTZ(ts, 3),
+    WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '5',
+    'fields.sku.length' = '2',
+    'fields.quantity.min' = '1',
+    'fields.quantity.max' = '50',
+    'fields.basePrice.min' = '10',
+    'fields.basePrice.max' = '100',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '10000000'
+);
+
+CREATE TABLE competitor_prices (
+    sku STRING,
+    price DOUBLE,
+    ts BIGINT,
+    event_time AS TO_TIMESTAMP_LTZ(ts, 3),
+    WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '3',
+    'fields.sku.length' = '2',
+    'fields.price.min' = '8',
+    'fields.price.max' = '120',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '100000'
+);
+
+CREATE FUNCTION DynamicPricingEngine AS 'com.flink.ptf.DynamicPricingEngine';
+
+SELECT sku, newPrice, oldPrice, reason, `timestamp`
+FROM DynamicPricingEngine(
+    inventoryEvent => TABLE inventory PARTITION BY sku,
+    competitorPriceEvent => TABLE competitor_prices PARTITION BY sku,
+    uid => 'pricing-engine-v1'
+);
+```
+
+**Output:** Emits `PriceUpdate` POJO with `(sku, newPrice, oldPrice, reason, timestamp)` when price changes exceed threshold.
