@@ -5,8 +5,8 @@ This repository contains example implementations of Apache Flink ProcessTableFun
 ## Overview
 
 This project demonstrates how to:
-- Create custom ProcessTableFunctions in Apache Flink 2.1
-- Connect to Confluent Cloud Kafka using the Kafka connector 2.0.1
+- Create custom ProcessTableFunctions in Apache Flink 2.2
+- Connect to Confluent Cloud Kafka using the Kafka connector 4.0.1-2.0
 - Use Avro Confluent format for deserialization
 - Run Flink SQL queries using PTFs
 - Deploy everything in a Docker environment
@@ -64,11 +64,15 @@ This provides progressive refinement of window results as data arrives.
 
 - Docker and Docker Compose installed
 - Maven 3.6+ (for building the project)
-- Java 17+
+- Java 11+
+
+**For Kafka examples (HybridWindow, EarlyFireWindow) only:**
 - Confluent Cloud account with:
   - Kafka cluster
   - Schema Registry
   - API keys and secrets
+
+**Note:** Datagen examples (3-10) work standalone without any external dependencies.
 
 ## Setup
 
@@ -83,7 +87,7 @@ mvn clean package
 This will:
 - Compile the Java code
 - Package the PTF classes into a JAR file
-- Place the JAR in `target/flink-ptf-examples-1.0.1.jar`
+- Place the JAR in `target/flink-ptf-examples-1.0.2.jar`
 
 ### 2. Build Docker Image
 
@@ -94,8 +98,8 @@ docker-compose build --no-cache
 ```
 
 This Dockerfile automatically:
-- Uses Flink 2.1.0 base image
-- Downloads and installs Flink Kafka connector 2.0.1
+- Uses Flink 2.2.0 base image
+- Downloads and installs Flink Kafka connector 4.0.1-2.0
 - Downloads and installs Flink SQL Avro Confluent format
 - Includes the PTF JAR in the Flink lib directory
 
@@ -547,7 +551,6 @@ The `ChangelogAuditor` PTF demonstrates consuming changelog streams with SUPPORT
 **Advanced Features:**
 - **SUPPORT_UPDATES**: Consumes changelog streams (INSERT, UPDATE, DELETE)
 - **RowKind Handling**: Inspects `input.getKind()` to determine change type
-- **Versioned Views**: Works with views that produce changelog output
 - **Audit Trail**: Converts changelog to append-only audit log
 
 **Changelog Types:**
@@ -581,7 +584,7 @@ CREATE TABLE currency_rates (
     'fields.rate.max' = '2.0'
 );
 
--- Create versioned view (generates changelog)
+-- Create versioned view that produces changelog
 CREATE VIEW versioned_rates AS
 SELECT currency, rate, update_time
 FROM (
@@ -669,8 +672,10 @@ The `RowFormatter` PTF demonstrates polymorphic table arguments by accepting tab
 
 **How Polymorphic Arguments Work:**
 ```java
-// NON-polymorphic: Explicit schema required
-public void eval(@ArgumentHint(SET_SEMANTIC_TABLE) @DataTypeHint("ROW<id INT, name STRING>") Row input) {
+// NON-polymorphic: Explicit schema required (uses type= inside @ArgumentHint)
+public void eval(
+    @ArgumentHint(value = SET_SEMANTIC_TABLE, type = @DataTypeHint("ROW<id INT, name STRING>"))
+    Row input) {
   // Only works with tables matching this exact schema
 }
 
