@@ -800,3 +800,74 @@ FROM DebeziumTransactionDenormalizer(
 **Output:** Emits `DenormalizedTransaction` POJO with `(transaction_id, order_id, customer_id, status, total_amount, line_items)` per transaction.
 
 **Note:** The `line_items` field contains a `LineItem[]` array with product details. The SQL Client cannot display nested arrays in table view, but the data is correctly populated. Use `CARDINALITY(line_items)` to verify or sink to Kafka/filesystem for full output.
+
+### 11. DynamoDB Changelog Emitter PTF (Changelog Output)
+
+The `DynamoDBChangelogEmitter` PTF demonstrates emitting changelog output from append-only input - the inverse of ChangelogAuditor:
+
+| PTF | Input | Output |
+|-----|-------|--------|
+| ChangelogAuditor | Changelog (updating) | Append-only |
+| DynamoDBChangelogEmitter | Append-only (CDC JSON) | Changelog (updating) |
+
+**Advanced Features:**
+- **ChangelogFunction Interface**: Declares retract output mode `{+I, -U, +U, -D}`
+- **Row.ofKind()**: Emits rows with explicit RowKind (INSERT, UPDATE_BEFORE, UPDATE_AFTER, DELETE)
+- **DynamoDB Type Parsing**: Extracts values from `{"S": "...", "N": "..."}` wrappers
+- **Generic Schema**: Works with any DynamoDB table structure
+
+**DynamoDB Event Mapping (Retract Mode):**
+
+| DynamoDB eventName | Flink RowKind |
+|-------------------|---------------|
+| INSERT | `+I` (INSERT) |
+| MODIFY | `-U` (UPDATE_BEFORE with OldImage) then `+U` (UPDATE_AFTER with NewImage) |
+| REMOVE | `-D` (DELETE) |
+
+**Note:** Retract mode is used because Flink's SQL Client debugging sinks operate in retract mode. Upsert mode PTFs must be tested with upserting sinks (e.g., kafka-upsert connector).
+
+**Test Data:**
+
+Test data is provided in `test-data/dynamodb/` and baked into the Docker image:
+
+```sql
+-- Create source table for DynamoDB CDC events
+CREATE TABLE dynamodb_cdc (
+    eventID STRING,
+    eventName STRING,
+    dynamodb ROW<
+        Keys MAP<STRING, ROW<S STRING, N STRING>>,
+        NewImage MAP<STRING, ROW<S STRING, N STRING>>,
+        OldImage MAP<STRING, ROW<S STRING, N STRING>>,
+        SequenceNumber STRING,
+        SizeBytes BIGINT,
+        StreamViewType STRING
+    >,
+    pk AS dynamodb.Keys['pk'].S
+) WITH (
+    'connector' = 'filesystem',
+    'path' = '/opt/flink/test-data/dynamodb/events.json',
+    'format' = 'json'
+);
+
+CREATE FUNCTION DynamoDBChangelogEmitter AS 'com.flink.ptf.DynamoDBChangelogEmitter';
+
+-- IMPORTANT: Set changelog result mode to see RowKind (+I, -U, +U, -D) in output
+SET 'sql-client.execution.result-mode' = 'changelog';
+
+-- Query emits changelog with proper RowKind
+SELECT pk, sk, attributes_json, sequence_number, event_time
+FROM DynamoDBChangelogEmitter(
+    input => TABLE dynamodb_cdc PARTITION BY pk,
+    uid => 'dynamodb-changelog-v1'
+);
+```
+
+**Output:** Emits rows with `(pk, sk, attributes_json, sequence_number, event_time)` and proper RowKind for changelog semantics.
+
+**Expected Results:**
+- Row 1: `+I` for user#1 INSERT (Alice, age 30)
+- Row 2: `-U` for user#1 MODIFY (old: age 30)
+- Row 3: `+U` for user#1 MODIFY (new: age 31)
+- Row 4: `+I` for user#2 INSERT (Bob, age 25)
+- Row 5: `-D` for user#1 REMOVE
