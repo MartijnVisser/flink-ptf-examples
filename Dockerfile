@@ -1,4 +1,4 @@
-FROM flink:2.1.0-scala_2.12-java11
+FROM apache/flink:2.2-java11
 
 WORKDIR /opt/flink
 
@@ -9,7 +9,7 @@ RUN wget -q -O /tmp/flink-sql-connector-kafka.jar \
 
 # Download and install Flink SQL Avro Confluent format
 RUN wget -q -O /tmp/flink-sql-avro-confluent-registry.jar \
-    https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro-confluent-registry/2.1.0/flink-sql-avro-confluent-registry-2.1.0.jar && \
+    https://repo1.maven.org/maven2/org/apache/flink/flink-sql-avro-confluent-registry/2.2.0/flink-sql-avro-confluent-registry-2.2.0.jar && \
     mv /tmp/flink-sql-avro-confluent-registry.jar /opt/flink/lib/
 
 # Note: flink-json (for debezium-json format) is built-in for SQL Client, no download needed
@@ -18,8 +18,4 @@ RUN wget -q -O /tmp/flink-sql-avro-confluent-registry.jar \
 COPY target/flink-ptf-examples-1.0.2.jar /opt/flink/lib/
 
 # Copy test data for Debezium example (accessible at /opt/flink/test-data/)
-COPY test-data/ /opt/flink/test-data/
-
-# Ensure test data files are readable
-RUN chmod -R 644 /opt/flink/test-data/debezium/*.json && \
-    chmod 755 /opt/flink/test-data /opt/flink/test-data/debezium
+COPY --chmod=755 test-data/ /opt/flink/test-data/
