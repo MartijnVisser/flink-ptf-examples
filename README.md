@@ -286,3 +286,56 @@ To stop all containers:
 ```bash
 docker-compose down
 ```
+
+## Datagen Examples
+
+The following examples use Flink's built-in Datagen connector to generate sample data, making them easy to run without external dependencies.
+
+### 3. Anomaly Detector PTF (Enhanced)
+
+The `AnomalyDetector` PTF demonstrates advanced state management with multiple state types for fraud detection:
+
+**Advanced Features:**
+- **MapView State**: Tracks merchant transaction counts (24-hour TTL)
+- **ListView State**: Maintains transaction history for pattern analysis (7-day TTL)
+- **Value State (POJO)**: Stores user profile with spending patterns (30-day TTL)
+- **Multiple TTLs**: Different retention periods per state type
+
+**State Management:**
+- `userState`: POJO tracking lifetime stats, average transaction, last activity (30-day TTL)
+- `merchantCounts`: MapView tracking transactions per merchant (24-hour TTL)
+- `recentTransactions`: ListView of recent transaction records (7-day TTL)
+
+**Usage:**
+
+```sql
+CREATE TABLE transactions (
+    userId STRING,
+    amount DOUBLE,
+    merchantId STRING,
+    ts BIGINT,
+    event_time AS TO_TIMESTAMP_LTZ(ts, 3),
+    WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '10',
+    'fields.userId.length' = '5',
+    'fields.amount.min' = '1',
+    'fields.amount.max' = '10000',
+    'fields.merchantId.length' = '3',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '10000000'
+);
+
+CREATE FUNCTION AnomalyDetector AS 'com.flink.ptf.AnomalyDetector';
+
+SELECT userId, isAnomaly, anomalyScore, reason, transactionAmount, timestamp
+FROM AnomalyDetector(
+    input => TABLE transactions PARTITION BY userId,
+    on_time => DESCRIPTOR(event_time),
+    uid => 'anomaly-detector-v1'
+);
+```
+
+**Output:** Emits `AnomalyResult` POJO with `(userId, isAnomaly, anomalyScore, reason, transactionAmount, timestamp)`.
