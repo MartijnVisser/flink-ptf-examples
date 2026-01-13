@@ -702,3 +702,96 @@ SELECT * FROM RowFormatter(input => TABLE orders PARTITION BY customer_id, uid =
 **Output:** `(formatted_row, schema_info, distinct_patterns)` - works with any input schema.
 
 **Note:** This is the only example demonstrating polymorphic table arguments and runtime schema inspection via Context APIs.
+
+### 10. Debezium Transaction Denormalizer PTF (Transaction Aggregation)
+
+The `DebeziumTransactionDenormalizer` PTF aggregates multiple CDC events from different tables that belong to the same database transaction into a single denormalized event:
+
+**Advanced Features:**
+- **Multiple Input Streams**: Processes orders CDC + order_items CDC + transaction boundary events
+- **Transaction Boundary Detection**: Uses Debezium's transaction metadata (BEGIN/END events)
+- **Completion Detection**: Waits for all events before emitting
+- **Nested Collections**: Stores line items as List in POJO state
+- **POJO Output**: Strongly-typed `DenormalizedTransaction` with `LineItem[]` array
+
+**How It Works:**
+1. Receives CDC events from multiple tables (orders, order_items)
+2. Buffers events in state, partitioned by transaction ID
+3. Listens for END event from Debezium transaction topic
+4. When all expected events arrive, emits denormalized result
+5. Clears state after emission
+
+**State Management:**
+- `TransactionState`: POJO with order header, line items list, event counts (1-hour TTL)
+
+**Test Data:**
+
+Test data is provided in `test-data/debezium/` and baked into the Docker image. Use filesystem connector for testing without Kafka:
+
+```sql
+-- Create filesystem tables for testing
+CREATE TABLE orders_cdc (
+    `before` ROW<id BIGINT, customer_id BIGINT, status STRING, total_amount DOUBLE>,
+    `after` ROW<id BIGINT, customer_id BIGINT, status STRING, total_amount DOUBLE>,
+    `source` ROW<version STRING, connector STRING, name STRING, ts_ms BIGINT, db STRING, `schema` STRING, `table` STRING, txId BIGINT, lsn BIGINT, xmin BIGINT>,
+    op STRING,
+    ts_ms BIGINT,
+    `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>,
+    transaction_id AS `transaction`.id
+) WITH (
+    'connector' = 'filesystem',
+    'path' = '/opt/flink/test-data/debezium/orders.json',
+    'format' = 'json'
+);
+
+CREATE TABLE order_items_cdc (
+    `before` ROW<id BIGINT, order_id BIGINT, product_id BIGINT, quantity INT, unit_price DOUBLE>,
+    `after` ROW<id BIGINT, order_id BIGINT, product_id BIGINT, quantity INT, unit_price DOUBLE>,
+    `source` ROW<version STRING, connector STRING, name STRING, ts_ms BIGINT, db STRING, `schema` STRING, `table` STRING, txId BIGINT, lsn BIGINT, xmin BIGINT>,
+    op STRING,
+    ts_ms BIGINT,
+    `transaction` ROW<id STRING, total_order BIGINT, data_collection_order BIGINT>,
+    transaction_id AS `transaction`.id
+) WITH (
+    'connector' = 'filesystem',
+    'path' = '/opt/flink/test-data/debezium/order_items.json',
+    'format' = 'json'
+);
+
+CREATE TABLE transaction_events (
+    status STRING,
+    id STRING,
+    ts_ms BIGINT,
+    event_count BIGINT,
+    data_collections ARRAY<ROW<data_collection STRING, event_count BIGINT>>
+) WITH (
+    'connector' = 'filesystem',
+    'path' = '/opt/flink/test-data/debezium/transaction.json',
+    'format' = 'json'
+);
+
+CREATE FUNCTION DebeziumTransactionDenormalizer AS 'com.flink.ptf.DebeziumTransactionDenormalizer';
+
+-- Execute (excluding line_items for display - SQL Client can't show nested arrays)
+SELECT transaction_id, order_id, customer_id, status, total_amount
+FROM DebeziumTransactionDenormalizer(
+  ordersEvent => TABLE orders_cdc PARTITION BY transaction_id,
+  orderItemsEvent => TABLE order_items_cdc PARTITION BY transaction_id,
+  transactionEvent => TABLE transaction_events PARTITION BY id,
+  uid => 'debezium-filesystem-test'
+);
+
+-- Verify line_items array is populated
+SELECT transaction_id, order_id, customer_id, status, total_amount,
+       CARDINALITY(line_items) as num_line_items
+FROM DebeziumTransactionDenormalizer(
+  ordersEvent => TABLE orders_cdc PARTITION BY transaction_id,
+  orderItemsEvent => TABLE order_items_cdc PARTITION BY transaction_id,
+  transactionEvent => TABLE transaction_events PARTITION BY id,
+  uid => 'debezium-filesystem-test'
+);
+```
+
+**Output:** Emits `DenormalizedTransaction` POJO with `(transaction_id, order_id, customer_id, status, total_amount, line_items)` per transaction.
+
+**Note:** The `line_items` field contains a `LineItem[]` array with product details. The SQL Client cannot display nested arrays in table view, but the data is correctly populated. Use `CARDINALITY(line_items)` to verify or sink to Kafka/filesystem for full output.
