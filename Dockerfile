@@ -17,5 +17,5 @@ RUN wget -q -O /tmp/flink-sql-avro-confluent-registry.jar \
 # Copy the PTF JAR file
 COPY target/flink-ptf-examples-1.0.2.jar /opt/flink/lib/
 
-# Copy test data for Debezium example (accessible at /opt/flink/test-data/)
+# Copy test data for Debezium and DynamoDB examples (accessible at /opt/flink/test-data/)
 COPY --chmod=755 test-data/ /opt/flink/test-data/
