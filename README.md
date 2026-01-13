@@ -463,3 +463,79 @@ FROM SessionTracker(
 ```
 
 **Output:** Emits `SessionSummary` POJO with `(userId, sessionStart, sessionEnd, eventCount, totalValue, eventTypes)`.
+
+### 6. First Match Join PTF (Enhanced)
+
+The `FirstMatchJoin` PTF demonstrates a specialized join pattern with multiple inputs:
+
+**Advanced Features:**
+- **Multiple Input Streams**: Processes orders AND customers (2 tables)
+- **First-Match Semantics**: Emits only once when both sides arrive (no updates)
+- **POJO Output**: Strongly-typed `EnrichedOrder` output
+- **TimeContext**: Uses event time for join timestamp
+
+**Join Semantics:**
+1. Waits for first arrival from both order and customer streams
+2. Emits exactly one enriched result
+3. Sets flag to prevent future emissions for this key
+4. Subsequent updates are ignored
+
+**State Management:**
+- `FirstMatchState`: POJO tracking order data, customer data, join metadata (1-hour TTL)
+
+**Usage:**
+
+```sql
+CREATE TABLE orders (
+    orderId STRING,
+    customerId INT,
+    totalAmount DOUBLE,
+    ts BIGINT,
+    event_time AS TO_TIMESTAMP_LTZ(ts, 3),
+    WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '5',
+    'fields.orderId.length' = '8',
+    'fields.customerId.min' = '1',
+    'fields.customerId.max' = '100',
+    'fields.totalAmount.min' = '10',
+    'fields.totalAmount.max' = '500',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '10000000'
+);
+
+CREATE TABLE customers (
+    customerId INT,
+    name STRING,
+    email STRING,
+    tier STRING,
+    ts BIGINT,
+    event_time AS TO_TIMESTAMP_LTZ(ts, 3),
+    WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
+) WITH (
+    'connector' = 'datagen',
+    'rows-per-second' = '3',
+    'fields.customerId.min' = '1',
+    'fields.customerId.max' = '100',
+    'fields.name.length' = '10',
+    'fields.email.length' = '15',
+    'fields.tier.length' = '4',
+    'fields.ts.kind' = 'sequence',
+    'fields.ts.start' = '1',
+    'fields.ts.end' = '10000000'
+);
+
+CREATE FUNCTION FirstMatchJoin AS 'com.flink.ptf.FirstMatchJoin';
+
+SELECT orderId, customerId, totalAmount, customerName, customerEmail, customerTier, firstArrival, joinTimestamp
+FROM FirstMatchJoin(
+    orderStream => TABLE orders PARTITION BY customerId,
+    customerStream => TABLE customers PARTITION BY customerId,
+    on_time => DESCRIPTOR(event_time),
+    uid => 'first-match-join-v1'
+);
+```
+
+**Output:** Emits `EnrichedOrder` POJO with order + customer columns and join metadata.
