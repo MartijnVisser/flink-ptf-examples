@@ -128,17 +128,19 @@ The `AnomalyDetector` PTF demonstrates advanced state management with multiple s
 CREATE TABLE transactions (
     userId STRING,
     amount DOUBLE,
-    merchantId STRING,
+    country STRING,
+    merchant STRING,
     ts BIGINT,
     event_time AS TO_TIMESTAMP_LTZ(ts, 3),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'datagen',
     'rows-per-second' = '10',
-    'fields.userId.length' = '5',
+    'fields.userId.length' = '1',
     'fields.amount.min' = '1',
     'fields.amount.max' = '10000',
-    'fields.merchantId.length' = '3',
+    'fields.country.length' = '2',
+    'fields.merchant.length' = '1',
     'fields.ts.kind' = 'sequence',
     'fields.ts.start' = '1',
     'fields.ts.end' = '10000000'
@@ -146,7 +148,7 @@ CREATE TABLE transactions (
 
 CREATE FUNCTION AnomalyDetector AS 'com.flink.ptf.AnomalyDetector';
 
-SELECT userId, isAnomaly, anomalyScore, reason, transactionAmount, timestamp
+SELECT userId, alertType, riskScore, reason, transactionCount
 FROM AnomalyDetector(
     input => TABLE transactions PARTITION BY userId,
     on_time => DESCRIPTOR(event_time),
@@ -154,7 +156,7 @@ FROM AnomalyDetector(
 );
 ```
 
-**Output:** Emits `AnomalyResult` POJO with `(userId, isAnomaly, anomalyScore, reason, transactionAmount, timestamp)`.
+**Output:** Emits `AnomalyResult` POJO with `(userId, alertType, riskScore, reason, transactionCount)`.
 
 ### 2. Dynamic Pricing Engine PTF
 

@@ -97,7 +97,7 @@ public class AnomalyDetector extends ProcessTableFunction<AnomalyDetector.FraudA
    * @param state User transaction state (30 day TTL)
    * @param merchantCounts Map of merchant visit counts (24 hour TTL)
    * @param recentTransactions List of recent transactions (7 day TTL)
-   * @param input Transaction row containing: userId, amount, country, merchant, timestamp
+   * @param input Transaction row containing: userId, amount, country, merchant, ts
    */
   public void eval(
       @StateHint(ttl = "30 days") AnomalyState state,
@@ -111,7 +111,7 @@ public class AnomalyDetector extends ProcessTableFunction<AnomalyDetector.FraudA
     Double amount = input.getFieldAs("amount");
     String country = input.getFieldAs("country");
     String merchant = input.getFieldAs("merchant");
-    Long timestamp = input.getFieldAs("timestamp");
+    Long timestamp = input.getFieldAs("ts");
 
     double riskScore = 0.0;
     List<String> reasons = new ArrayList<>();
