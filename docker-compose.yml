@@ -23,9 +23,6 @@ services:
       - flink-network
 
   taskmanager:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: flink-ptf-examples:latest
     container_name: flink-taskmanager
     hostname: taskmanager
@@ -44,9 +41,6 @@ services:
       - flink-network
 
   sql-client:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: flink-ptf-examples:latest
     command: bin/sql-client.sh
     depends_on:
